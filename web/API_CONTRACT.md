@@ -31,17 +31,25 @@ back as `/?auth_error=<code>` and are shown on the sign-in card; `POST /auth/log
 
 ## Books
 
-| Client call | Request |
-| --- | --- |
-| `listBooks` | `GET /books` -> `BookSummary[]` mapped to `BookMeta` (`hasCover` -> `/api/books/:id/cover`, `status`, indexing %) |
-| `saveBook` | `POST /books` multipart: `file` (original filename kept) + `title`. Returns `202` summary; **the server id replaces the client's** |
-| `getBookFile` | `GET /books/:id/file` - the EPUB is still parsed and paginated in the browser |
-| `updateBook` | `PATCH /books/:id` for title/author; reading position -> `PUT /books/:id/progress` `{ percent, location: { leaf } }` (debounced 700 ms) |
-| `deleteBook` | `DELETE /books/:id` |
+| Client call   | Request                                                                                                                                                                                      |
+|---------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `listBooks`   | `GET /books` -> `BookSummary[]` mapped to `BookMeta` (`hasCover` -> `/api/books/:id/cover`, `status`, indexing %, `progress.percent` -> `lastPercent`, `progress.updatedAt` -> `lastReadAt`) |
+| `saveBook`    | `POST /books` multipart: `file` (original filename kept) + `title`. Returns `202` summary; **the server id replaces the client's**                                                           |
+| `getBookFile` | `GET /books/:id/file` - the EPUB is still parsed and paginated in the browser                                                                                                                |
+| `updateBook`  | `PATCH /books/:id` for title/author; reading position -> `PUT /books/:id/progress` `{ percent, location: { leaf } }` (debounced 700 ms)                                                      |
+| `deleteBook`  | `DELETE /books/:id`                                                                                                                                                                          |
 
 Library polls `GET /books` every 4 s while any book is not `ready`/`failed` and shows "Indexing for AI n%". A book can be read
 immediately after upload; only Ask AI retrieval depends on indexing (the Worker falls back to selection + context).
 Re-dropping a file already in the library is matched by `size + filename` so annotations are reused instead of uploading twice.
+
+Shelf order is decided in the client (`src/book/libraryOrder.ts`): books with `lastReadAt` lead, most recently read
+first,
+followed by never-opened books newest addition first. Opening a book records the read time before the first page turn
+(`saveReadingProgress`), so a book that is opened and left still moves to the front. The cloud read time is
+`progress.updatedAt`, which every `PUT .../progress` refreshes; the local adapter stores `lastReadAt` on the book
+record.
+The spacious shelf layout shows a started book's `lastPercent` as a ring with its percentage; compact rows omit it.
 
 ## Highlights and inline notes
 

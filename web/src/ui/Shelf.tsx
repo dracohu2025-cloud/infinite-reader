@@ -70,6 +70,17 @@ function BackToShelf() {
   )
 }
 
+function ShelfProgress({percent}: { percent: number }) {
+    return <span className="shelf-progress">
+    <svg viewBox="0 0 32 32" aria-hidden="true">
+      <circle className="shelf-progress-track" cx="16" cy="16" r="13"/>
+      <circle className="shelf-progress-arc" cx="16" cy="16" r="13" pathLength={100}
+              strokeDasharray={`${percent} ${100 - percent}`} transform="rotate(-90 16 16)"/>
+    </svg>
+        {percent}%
+  </span>
+}
+
 function ShelfCover({ title, src }: { title: string; src?: string }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null)
   const hasImage = !!src && src !== failedSrc
@@ -78,7 +89,18 @@ function ShelfCover({ title, src }: { title: string; src?: string }) {
   </span>
 }
 
-function ShelfBook({ title, author, cover, spacious, onOpen, onDelete, onInfo }: { title: string; author?: string; cover?: string; spacious: boolean; onOpen: () => void; onDelete: () => void; onInfo: (anchor: HTMLButtonElement) => void }) {
+function ShelfBook({title, author, cover, percent, spacious, onOpen, onDelete, onInfo}: {
+    title: string;
+    author?: string;
+    cover?: string;
+    percent?: number;
+    spacious: boolean;
+    onOpen: () => void;
+    onDelete: () => void;
+    onInfo: (anchor: HTMLButtonElement) => void
+}) {
+    const progress = spacious && percent !== undefined && Number.isFinite(percent)
+        ? Math.min(100, Math.max(0, Math.round(percent))) : 0
   const titleRef = useRef<HTMLSpanElement>(null)
   const tooltipRef = useRef<HTMLSpanElement>(null)
   const menuButton = useRef<HTMLButtonElement>(null)
@@ -167,7 +189,11 @@ function ShelfBook({ title, author, cover, spacious, onOpen, onDelete, onInfo }:
             )}
           </span>
           <span className="author">{author}</span>
-          {spacious && <span className="shelf-book-action">{t("Start reading")}<Icon.right size={14} /></span>}
+            {spacious && <span className="shelf-book-action">
+            {progress > 0 && <ShelfProgress percent={progress}/>}
+                {progress > 0 ? t("Continue reading") : t("Start reading")}
+                <Icon.right size={14}/>
+          </span>}
         </span>
       </button>
       <button ref={menuButton} type="button" className="shelf-book-more" aria-label={t("More actions for {0}", title)}
@@ -343,6 +369,7 @@ export function Shelf({ onOpenCosts }: { onOpenCosts?: () => void }) {
                   title={b.title || t("Untitled")}
                   author={b.author?.trim()}
                   cover={b.coverDataUrl}
+                  percent={b.lastPercent}
                   spacious={layout === 'spacious'}
                   onOpen={() => void openFromLibrary(b.id)}
                   onInfo={anchor => setInfoTarget({ id: b.id, owner, anchor })}

@@ -1,5 +1,6 @@
 import { flushAnnotation } from '../storage'
 import { phonePositionKey, restoreReadingPosition } from '../book/readingPosition'
+import {mergeReadTimes, orderLibrary, touchLibrary} from '../book/libraryOrder'
 import { t } from '../i18n/runtime.ts'
 import { DEFAULT_NOTE_FONT, noteFontIdOf, type NoteFontId } from '../book/noteFontCatalog'
 import { readerFontIdOf, quoteFontIdOf, type ReaderFontId, type QuoteFontId } from '../book/fontCatalog'
@@ -141,6 +142,13 @@ let libraryTimer = 0
 let localJudouWrite = Promise.resolve()
 let noteLayoutVersion = 0
 const noteFontSelections = new Map<string, symbol>()
+/** Read times recorded in this page session, merged over a refresh that may not see them yet. */
+const sessionReadAt = new Map<string, number>()
+
+function recordRead(books: BookMeta[], id: string, at: number) {
+    sessionReadAt.set(id, Math.max(sessionReadAt.get(id) ?? 0, at))
+    return touchLibrary(books, id, at)
+}
 
 function bookAndNoteText(parsed: ParsedBook, annotations: Annotation[]) {
   return '笔记·续写下你的想法Note continued Write your thoughts' + parsed.meta.title + parsed.meta.author + parsed.chapters.map((ch) => ch.blocks.map((b) => b.text).join('')).join('') +
@@ -379,6 +387,7 @@ export const useReader = create<ReaderState>((set, get) => ({
   async logout() {
     await flushStorage().catch(() => undefined)
     await authApi.logout().catch(() => undefined)
+      sessionReadAt.clear()
     get().scene?.clearBook()
     const providers = await authApi.providers().catch(() => ({ email: true, google: false }))
     setStorageMode('local')
@@ -388,6 +397,7 @@ export const useReader = create<ReaderState>((set, get) => ({
 
   goOffline() {
     setStorageMode('local')
+      sessionReadAt.clear()
     get().scene?.clearBook()
     set({ urlLock: 'hold', session: { status: 'local' }, showLogin: false, current: null, annotations: [], open: false, loading: pendingBookLoading() })
     void (async () => {
@@ -423,7 +433,17 @@ export const useReader = create<ReaderState>((set, get) => ({
           chapter: page.chapter, start: page.start, title: page.special === 'title' }))
       } catch { /* Reading still works when browser storage is unavailable. */ }
     }
-    await storage.updateBook(current.meta.id, progress)
+      // Opening or turning a page leads the shelf with this book and keeps its ring current.
+      const lastReadAt = Date.now()
+      set({
+          library: recordRead(get().library, current.meta.id, lastReadAt).map((book) =>
+              book.id === current.meta.id ? {
+                  ...book,
+                  lastLeaf: progress.lastLeaf,
+                  lastPercent: progress.lastPercent
+              } : book)
+      })
+      await storage.updateBook(current.meta.id, {...progress, lastReadAt})
   },
   async setReaderFont(value) { await get().setReadingFonts(value, get().quoteFont) },
   async setQuoteFont(value) { await get().setReadingFonts(get().readerFont, value) },
@@ -500,7 +520,7 @@ export const useReader = create<ReaderState>((set, get) => ({
 
   async refreshLibrary() {
     try {
-      const library = await storage.listBooks()
+        const library = orderLibrary(mergeReadTimes(await storage.listBooks(), sessionReadAt))
       set({ library })
       window.clearTimeout(libraryTimer)
       if (library.some((b) => b.status && b.status !== 'ready' && b.status !== 'failed')) libraryTimer = window.setTimeout(() => void get().refreshLibrary(), 4000)
@@ -594,6 +614,8 @@ export const useReader = create<ReaderState>((set, get) => ({
         urlLock: 'none',
         error: null,
       })
+        // Opening counts as reading, so a book that is never turned still leads the shelf.
+        void get().saveReadingProgress().catch(() => undefined)
       await get().refreshLibrary()
     } catch (err) {
       console.error(err)
@@ -636,6 +658,7 @@ export const useReader = create<ReaderState>((set, get) => ({
   },
 
   async removeBook(id) {
+      sessionReadAt.delete(id)
     await storage.deleteBook(id)
     set({ library: get().library.filter((book) => book.id !== id) })
     if (get().current?.meta.id === id) {

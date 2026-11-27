@@ -74,6 +74,8 @@ export interface BookMeta {
   lastLeaf?: number
   lastPercent?: number
   filename?: string
+  /** Last reading activity (opened or turned); drives the shelf order. */
+  lastReadAt?: number
   /** backend indexing state; absent for local books */
   status?: 'uploaded' | 'parsing' | 'indexing' | 'ready' | 'failed' | 'deleting'
   indexPercent?: number

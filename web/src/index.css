@@ -776,6 +776,12 @@ ul.books .meta em.st.failed { color: #ff9c8c; }
 .shelf-book-cover[data-image] { border:0; background:#eee9dc; }
 .shelf-book-cover img { display:block; width:100%; height:100%; object-fit:contain; }
 .shelf-book-action { display:flex; align-items:center; gap:10px; margin-top:12px; font-size:12px; }
+.shelf-progress { display:inline-flex; align-items:center; gap:7px; color:var(--ink); font-size:12px; font-variant-numeric:tabular-nums; }
+.shelf-progress svg { width:20px; height:20px; flex:none; }
+.shelf-progress circle { fill:none; stroke-width:3; }
+.shelf-progress-track { stroke:var(--shelf-line); }
+.shelf-progress-arc { stroke:var(--ink); stroke-linecap:round; transition:stroke .15s, stroke-dasharray .3s var(--ease); }
+.shelf-books button:hover .shelf-progress-arc { stroke:var(--shelf-hover); }
 @media(max-width:720px) {
   .shelf[data-layout="spacious"] .shelf-books { grid-template-columns:minmax(0,1fr); gap:14px; }
   .shelf[data-layout="spacious"] .shelf-book-open { min-height:138px; grid-template-columns:64px minmax(0,1fr); padding:20px 42px 20px 20px; gap:20px; }

@@ -100,6 +100,8 @@ export function fromServerBook(b: BookSummary): BookMeta {
     coverDataUrl: b.hasCover ? `/api/books/${enc(b.id)}/cover` : undefined,
     lastLeaf: typeof leaf === 'number' ? leaf : undefined,
     lastPercent: b.progress?.percent,
+      // progress.updatedAt is refreshed by every progress PUT, so it doubles as the last-read time.
+      lastReadAt: b.progress?.updatedAt,
     status: b.status,
     indexPercent: b.chunkCount ? Math.round((b.indexedChunks / b.chunkCount) * 100) : undefined,
   }

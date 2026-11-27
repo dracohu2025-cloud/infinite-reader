@@ -64,6 +64,7 @@ READER_URL=http://127.0.0.1:5202 node web/scripts/check-shelf-startup.mjs
 READER_URL=http://127.0.0.1:5202 node web/scripts/check-font-recovery.mjs
 READER_URL=http://127.0.0.1:5202/shelf node web/scripts/check-shelf-samples.mjs
 READER_URL=http://127.0.0.1:5202/shelf node web/scripts/check-shelf-loading.mjs
+READER_URL=http://127.0.0.1:5202/shelf node web/scripts/check-shelf-recent.mjs
 READER_URL=http://127.0.0.1:5202/shelf node web/scripts/check-login-consent.mjs
 node --experimental-strip-types --test web/src/book/fontDownloads.test.ts web/src/book/wenkaiSubsets.test.ts web/src/book/fontCatalog.test.ts web/src/route/bookPath.test.ts web/src/route/entry.test.ts
 node web/scripts/check-i18n-source.mjs
