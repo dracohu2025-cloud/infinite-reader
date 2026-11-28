@@ -55,6 +55,9 @@ export async function resolveFootnotes(doc: Document, path: string, resolvePath:
     if (isDefinitionBacklink(a, target, doc, path, targetPath, resolvePath)) continue
     const semantic = hasType(a, ['noteref', 'doc-noteref']) || hasType(target, ['footnote', 'endnote', 'doc-footnote', 'doc-endnote'])
     const marked = a.closest('sup, .footnote-mark, .noteref') && (noteClass(target) || /^f(?:oot)?n\d/i.test(id))
+    // Some EPUBs mark only the image link and its matching list item with classes.
+    const imageNote = noteClass(a) && target.matches('li.footnote-item, li.endnote-item')
+      && !a.textContent?.trim() && a.querySelectorAll('img, image').length === 1
     // Some EPUB 2 books put the ID on an empty anchor inside the note paragraph.
     let body = target.localName === 'a' && target.parentElement && /^(p|li|aside)$/i.test(target.parentElement.localName) ? target.parentElement : target
     // Numbered endnotes may span several paragraphs, with the return link in the
@@ -63,7 +66,7 @@ export async function resolveFootnotes(doc: Document, path: string, resolvePath:
     if (item?.localName === 'li' && item.firstElementChild === body && !item.querySelector('li') &&
       !Array.from(item.querySelectorAll('[id]')).some(el => !body.contains(el)) &&
       isLinkedEndnote(a, item, path, targetPath, resolvePath)) body = item
-    if (!semantic && !marked && !isLinkedEndnote(a, body, path, targetPath, resolvePath)) continue
+    if (!semantic && !marked && !imageNote && !isLinkedEndnote(a, body, path, targetPath, resolvePath)) continue
     const clone = body.cloneNode(true) as Element
     for (const link of Array.from(clone.querySelectorAll('a'))) {
       if (isBacklink(link)) link.remove()

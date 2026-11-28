@@ -67,9 +67,17 @@ imageZip.file('chapter.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml" xmlns
 <aside epub:type="footnote" id="note"><ol><li>Image note explanation.</li></ol></aside>
 <p>Unrelated image<a href="#ordinary"><img src="picture.svg"/></a></p><p id="ordinary">An ordinary destination.</p>
 <p>Missing note<a epub:type="noteref" href="#missing"><img src="missing.svg"/></a></p>
+<p>段首<a class="footnote" href="#source-a"><img src="mark.svg" alt=""/></a>中间<a class="footnote" href="#source-b"><img src="mark.svg" alt=""/></a>段尾。</p>
+<ol class="footnote-content">
+  <li class="footnote-item" id="source-a"><p>第一条注释。</p></li>
+  <li class="footnote-item" id="source-b"><p>第二条注释。</p></li>
+  <li class="footnote-item" id="unused"><p>Unreferenced definition.</p></li>
+</ol>
+<p>Ordinary target<a class="footnote" href="#ordinary"><img src="figure.svg"/></a>.</p>
+<p>Ordinary image link<a href="#unused"><img src="link.svg"/></a>.</p>
 <p>Terminal reference<a epub:type="noteref" href="#note"><img src="note.svg"/></a></p>
 </body></html>`)
-for (const name of ['note.svg', 'picture.svg', 'missing.svg']) imageZip.file(name, '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="brown"/></svg>')
+for (const name of ['note.svg', 'picture.svg', 'missing.svg', 'mark.svg', 'figure.svg', 'link.svg']) imageZip.file(name, '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="brown"/></svg>')
 const imageFixture = await imageZip.generateAsync({type:'base64'})
 const browser = await puppeteer.launch({ executablePath:process.env.CHROME_BIN || '/usr/bin/chromium', headless:true, args:['--no-sandbox','--use-angle=swiftshader','--use-gl=angle','--enable-unsafe-swiftshader','--ignore-gpu-blocklist'], defaultViewport:{width:1440,height:900} })
 const page = await browser.newPage()
@@ -125,12 +133,16 @@ try {
     const book = await parseEpub(Uint8Array.from(atob(data), c=>c.charCodeAt(0)).buffer)
     const blocks = book.chapters[0].blocks
     const visible = inlineImageFootnotes(blocks.filter(b=>!b.footnoteDefinition))
+    const paragraph = visible.find(b=>b.text.startsWith('段首'))
     return { images: visible.filter(b=>b.img).map(b=>b.img.path), badges: visible.flatMap(b=>b.runs.filter(r=>r.footnote)).length,
+      paragraphText: paragraph?.text, paragraphNotes: paragraph?.runs.filter(r=>r.footnote).map(r=>r.footnote.text),
+      unreferenced: visible.some(b=>b.text.includes('Unreferenced definition.')),
       definitions: blocks.filter(b=>b.footnoteDefinition).length, joined: visible[0].text,
       terminalEnd: visible.at(-1).start+visible.at(-1).text.length, sourceEnd: book.chapters[0].textLength }
   }, imageFixture)
-  check(imageNotes.badges===2 && imageNotes.definitions===1 && imageNotes.joined==='Before  After.', 'image references become inline badges and hide their resolved definition')
-  check(imageNotes.images.join(',')==='picture.svg,missing.svg', 'ordinary linked images and unresolved notes remain visible')
+  check(imageNotes.paragraphText==='段首  中间  段尾。' && imageNotes.paragraphNotes?.join('/')==='第一条注释。/第二条注释。', 'class-marked publisher icons and the following prose share their original paragraph and note targets')
+  check(imageNotes.badges===4 && imageNotes.definitions===3 && imageNotes.joined==='Before  After.', 'image references become inline badges and hide their resolved definition')
+  check(imageNotes.images.join(',')==='picture.svg,missing.svg,figure.svg,link.svg' && imageNotes.unreferenced, 'ordinary links, illustrations, unresolved references and unreferenced definitions remain visible')
   check(imageNotes.terminalEnd===imageNotes.sourceEnd, 'terminal image reference adds no characters beyond source text')
   const parsed = await page.evaluate(async (data, baseline) => {
     const {parseEpub} = await import('/src/book/epub.ts')
@@ -189,6 +201,11 @@ try {
   await page.click('.footnote-hit:not(:disabled)')
   await page.waitForSelector('.footnote-popover')
   check(await page.$eval('.footnote-content', e=>e.textContent)==='Image note explanation.', 'image reference opens its exact note content')
+  await page.keyboard.press('Escape')
+  await openBook(imageFixture, '第二条注释。')
+  await page.click('.footnote-hit[data-footnote-id="chapter.xhtml#source-b"]:not(:disabled)')
+  await page.waitForSelector('.footnote-popover')
+  check(await page.$eval('.footnote-content', e=>e.textContent)==='第二条注释。', 'publisher image reference opens its own note')
   await page.keyboard.press('Escape')
   if (process.env.EPUB_FILE) {
     const bytes = await fs.readFile(process.env.EPUB_FILE)
