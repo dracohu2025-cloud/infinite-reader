@@ -4,8 +4,12 @@ import { sha256Hex, HttpError } from '../lib/util';
 import manifest from './data/text-gazetteer.json';
 import { alternateHanSpellings } from './hanSpellings';
 
-export const TEXT_RESOLVER_VERSION = 7;
+export const TEXT_RESOLVER_VERSION = 8;
 const MOUNTAIN_CODES = ['MT', 'MTS', 'PK', 'VLC'];
+const ISLAND_CODES = ['ISL', 'ISLS', 'ATOL', 'ISLX'];
+const STATE_COUNTRIES = new Set(['US', 'AU', 'DE', 'AT', 'CH', 'BR', 'MX', 'IN', 'MY', 'MM', 'FM', 'NG', 'ET', 'VE', 'RU']);
+const BARE_HAN_NAME = /^\p{Script=Han}{2,}$/u;
+const FORMAL_PLACE_SUFFIX = /[州省市县縣区區道府郡乡鄉镇鎮村岛島群山峰岭嶺河江海港湾灣关關]$/;
 
 /** Refresh affected legacy results only after explicit generation consent. */
 export function reusableTextResult(result: TextAtlasResult, resolverVersion?: number) {
@@ -17,7 +21,7 @@ export function reusableTextResult(result: TextAtlasResult, resolverVersion?: nu
 // Alias metadata: language code, historical flag, valid-from, valid-to (source strings).
 export type GeoAlias = [string, boolean, string, string];
 export type GeoRecord = [string, string, number, number, string, string, string, string, string, GeoAlias[]];
-export type PlaceKind = 'pass' | 'city' | 'settlement' | 'admin' | 'mountain' | 'mountain_range' | 'river' | 'site' | 'unknown';
+export type PlaceKind = 'pass' | 'city' | 'settlement' | 'admin' | 'island' | 'mountain' | 'mountain_range' | 'river' | 'site' | 'unknown';
 export interface PlaceQuery { name: string; aliases: string[]; kind: PlaceKind; country: string }
 export const normalizePlace = (s: string) => s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const nameVariants = (name: string, query: PlaceQuery) => {
@@ -65,6 +69,7 @@ const compatible = (r: GeoRecord, kind: PlaceKind) => {
     case 'pass': return r[5] === 'PASS';
     case 'city': case 'settlement': return r[4] === 'P';
     case 'admin': return r[4] === 'A';
+    case 'island': return r[4] === 'T' && ISLAND_CODES.includes(r[5]);
     case 'mountain': return MOUNTAIN_CODES.includes(r[5]);
     case 'mountain_range': return r[5] === 'MTS';
     case 'river': return ['STM', 'STMS'].includes(r[5]);
@@ -78,6 +83,11 @@ const distance = (a: [number, number], b: [number, number]) => {
 };
 
 type PlaceLookup = (name: string, country: string) => Promise<GeoRecord[]>;
+
+function adminSuffixes(country: string) {
+  if (country === 'JP') return ['县', '府'];
+  return STATE_COUNTRIES.has(country) ? ['州', '省'] : ['省', '州'];
+}
 
 async function lookupNameGroup(names: string[], country: string, lookup: PlaceLookup, allowHanFallback = true) {
   const matches = new Map<string, GeoRecord>(), formalCityRows: GeoRecord[] = [];
@@ -96,6 +106,17 @@ async function lookupNameGroup(names: string[], country: string, lookup: PlaceLo
   return { matches, formalCityRows, converted: matches.size > 0 };
 }
 
+/** Try formal Han administrative suffixes when GeoNames omits the short Chinese state/province spelling. */
+async function lookupAdminSuffixes(name: string, country: string, lookup: PlaceLookup, allowHanFallback: boolean, accept: (rows: GeoRecord[]) => boolean) {
+  const base = normalizePlace(name);
+  if (!BARE_HAN_NAME.test(base) || FORMAL_PLACE_SUFFIX.test(base)) return null;
+  for (const suffix of adminSuffixes(country)) {
+    const group = await lookupNameGroup([`${base}${suffix}`], country, lookup, allowHanFallback);
+    if (accept([...group.matches.values()])) return group;
+  }
+  return null;
+}
+
 /** Name/type/region constraints precede proximity. Never invent a coordinate. */
 export async function resolveTextPlaces(queries: PlaceQuery[], region: string, lookup: PlaceLookup) {
   const places: TextAtlasPlace[] = [], unresolved: string[] = [];
@@ -110,8 +131,12 @@ export async function resolveTextPlaces(queries: PlaceQuery[], region: string, l
   };
   for (const query of queries) {
     if (region && !regions.has(query.country)) {
-      const { matches, converted } = await lookupNameGroup([region], query.country,
-        async (name, country) => (await lookup(name, country)).filter(r => r[5] === 'ADM1'));
+      const adm1Lookup = async (name: string, country: string) => (await lookup(name, country)).filter(r => r[5] === 'ADM1');
+      let { matches, converted } = await lookupNameGroup([region], query.country, adm1Lookup);
+      if (!matches.size) {
+        const fallback = await lookupAdminSuffixes(region, query.country, adm1Lookup, true, rows => rows.length > 0);
+        if (fallback) ({ matches, converted } = fallback);
+      }
       regions.set(query.country, { code: matches.size === 1 ? matches.values().next().value![6] : undefined, converted });
     }
     const matchedRegion = regions.get(query.country);
@@ -120,11 +145,20 @@ export async function resolveTextPlaces(queries: PlaceQuery[], region: string, l
     let formalCityRows: GeoRecord[] = [];
     let usedHanSpelling = matchedRegion?.converted ?? false;
     let sourceMatchedExactly = false;
+    let exactSourceMissing = false;
     for (const name of [...new Set([query.name, ...query.aliases])]) {
       const variants = nameVariants(name, query);
       // A model alias may still narrow an exact source name using its own exact
       // spelling. A speculative conversion of that alias should never overturn it.
       const group = await lookupNameGroup(variants, query.country, lookup, !sourceMatchedExactly);
+      if (name === query.name && !group.matches.size) exactSourceMissing = true;
+      if (name === query.name && query.kind === 'admin' && ![...group.matches.values()].some(r => compatible(r, 'admin'))) {
+        const fallback = await lookupAdminSuffixes(name, query.country, lookup, !sourceMatchedExactly, rows => rows.some(r => compatible(r, 'admin')));
+        if (fallback) {
+          for (const [id, row] of fallback.matches) group.matches.set(id, row);
+          group.converted ||= fallback.converted;
+        }
+      }
       const { matches, converted } = group;
       if (!matches.size) continue;
       if (name === query.name) {
@@ -134,6 +168,18 @@ export async function resolveTextPlaces(queries: PlaceQuery[], region: string, l
       usedHanSpelling ||= converted;
       // A translation may narrow an ambiguous name, but never broaden or replace an exact match.
       candidates = candidates ? new Map([...candidates].filter(([id]) => matches.has(id))) : matches;
+    }
+    // When an unqualified Han name has no exact entry (e.g. GeoNames only lists its 州/省/县 form)
+    // and non-settlement alias candidates still disagree, intersect with its formal admin name.
+    if (query.kind === 'unknown' && exactSourceMissing && candidates && candidates.size > 1
+      && ![...candidates.values()].some(r => r[4] === 'P')) {
+      const existing = candidates;
+      const fallback = await lookupAdminSuffixes(query.name, query.country, lookup, !usedHanSpelling,
+        rows => rows.some(r => existing.has(r[0])));
+      if (fallback) {
+        candidates = new Map([...existing].filter(([id]) => fallback.matches.has(id)));
+        usedHanSpelling ||= fallback.converted;
+      }
     }
     // Intersect names before type/region filtering: a recognized but incompatible alias
     // is contradictory evidence, not an absent name that can silently be ignored.
@@ -176,6 +222,16 @@ export async function resolveTextPlaces(queries: PlaceQuery[], region: string, l
       if (parent && rows.every(r => r[0] === parent[0] || (
         /^PPLA[3-5]$/.test(r[5]) && r[8] === parent[8] && r[6] === parent[6] && r[7] === parent[7]
         && distance([parent[2], parent[3]], [r[2], r[3]]) <= 25
+      ))) rows = [parent];
+    } else if (query.kind === 'admin' && !/[县縣区區市郡]$/.test(query.name)
+      && ![query.name, ...query.aliases].some(n => /\b(?:county|district|parish|borough|prefecture|city)\b/i.test(n))) {
+      // A first-level state/province and its subordinate county/district can share an unqualified name.
+      // Prefer the ADM1 only when every remaining candidate is a subordinate division inside it with a distinct canonical name.
+      const parents = rows.filter(r => r[5] === 'ADM1' && r[6]);
+      const parent = parents.length === 1 ? parents[0]! : undefined;
+      if (parent && rows.every(r => r[0] === parent[0] || (
+        /^ADM[2-5]$/.test(r[5]) && r[8] === parent[8] && r[6] === parent[6]
+        && normalizePlace(r[1]) !== normalizePlace(parent[1])
       ))) rows = [parent];
     }
     if (rows.length === 1) add(query, rows[0]!);

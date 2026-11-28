@@ -35,6 +35,19 @@ const anyangRows = anyangFixtureRaw as unknown as Record<string, geo.GeoRecord[]
 const hanRows = hanFixtureRaw as unknown as Record<string, geo.GeoRecord[]>;
 const lookupHan = async (name: string, country: string) => hanRows[`${country}:${geo.normalizePlace(name)}`] ?? [];
 const hanoi: geo.PlaceQuery = { name: '河内', aliases: [], kind: 'city', country: 'VN' };
+// Actual US:夏威夷州 / US:hawaii / US:hawaiianislands / UM:midway / JP:冲绳县 rows from the published GeoNames packs.
+const hawaiiIndex: Record<string, geo.GeoRecord[]> = {
+  'US:夏威夷州': [['5855797', 'Hawaii', -156.38612, 20.78785, 'A', 'ADM1', 'HI', '', 'US', [['zh', false, '', '']]]],
+  'US:hawaii': [
+    ['5853336', 'Puʻumakani', -156.88603, 20.77798, 'T', 'MT', 'HI', '009', 'US', []],
+    ['5855765', 'Hawaii County', -155.52289, 19.6024, 'A', 'ADM2', 'HI', '001', 'US', [['en', false, '', '']]],
+    ['5855797', 'Hawaii', -156.38612, 20.78785, 'A', 'ADM1', 'HI', '', 'US', [['en', false, '', '']]],
+    ['5855799', 'Island of Hawai‘i', -155.66494, 19.54814, 'T', 'ISL', 'HI', '001', 'US', [['de', false, '', '']]],
+    ['6463769', 'hawaii', -80.1198, 25.8602, 'S', 'HTL', 'FL', '', 'US', []],
+  ],
+  'US:hawaiianislands': [['5855811', 'Hawaiian Islands', -157.00974, 21.13446, 'T', 'ISLS', 'HI', '009', 'US', [['en', false, '', '']]]],
+};
+const lookupHawaii = async (name: string, country: string) => hawaiiIndex[`${country}:${geo.normalizePlace(name)}`] ?? [];
 const answer = () => Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ title: '平型关', period: '', region: '', places: [query] }) } }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } });
 async function setup() {
   const te = makeEnv(), client = new Client(te);
@@ -335,6 +348,30 @@ describe('confirmed text maps', () => {
     expect(extract).toHaveBeenCalledTimes(1);
     expect(geo.reusableTextResult({ ...result, map: { ...result.map!, places: [{ ...result.map!.places[0], featureCode: 'MTS' }] } }, 6)).toBe(true);
     expect(geo.reusableTextResult({ ...result, unresolved: ['河内'] }, 6)).toBe(false);
+  });
+
+  it('refreshes v7 unresolved Hawaii after consent once and preserves complete v7 results', async () => {
+    const { request, user, book } = await setup();
+    vi.mocked(geo.gazetteerLookup).mockReturnValue(lookupHawaii);
+    const extract = vi.fn(() => Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+      title: '夏威夷', period: '', region: '', places: [{ name: '夏威夷', aliases: ['Hawaii'], kind: 'unknown', country: 'US' }],
+    }) } }], usage: { prompt_tokens: 420, completion_tokens: 41 } }));
+    restore = mockFetch({ 'https://llm.test/chat/completions': extract }).restore;
+    const digest = await sha256Hex(`v2-global:${manifest.sha256}:夏威夷`);
+    const key = `${atlasPrefix(user.id, book.id)}text/${digest}.json`;
+    const old = { status: 'ready', startedAt: 1, resolverVersion: 7,
+      result: { status: 'uncertain', map: null, unresolved: ['夏威夷'], createdAt: 1, cached: false, cacheId: `text-${digest}` } };
+    await env.BOOKS.put(key, JSON.stringify(old));
+    expect((await request({ text: '夏威夷', confirmed: false })).status).toBe(400);
+    expect(extract).not.toHaveBeenCalled();
+    const result = await (await request({ text: '夏威夷', confirmed: true })).json<TextAtlasResult>();
+    expect(result).toMatchObject({ cached: false, status: 'ready', unresolved: [], map: { places: [{ id: 'geonames:5855797', coordinates: [-156.38612, 20.78785] }] } });
+    expect(await (await request({ text: '夏威夷', confirmed: true })).json()).toMatchObject({ cached: true, map: result.map });
+    expect(extract).toHaveBeenCalledTimes(1);
+    const saved = await (await env.BOOKS.get(key))!.json<any>();
+    expect(saved.resolverVersion).toBe(geo.TEXT_RESOLVER_VERSION);
+    expect(geo.reusableTextResult(saved.result, 7)).toBe(true);
+    expect(geo.reusableTextResult({ ...saved.result, unresolved: ['夏威夷'] }, 7)).toBe(false);
   });
 
   it('refreshes v5 unresolved Kaifeng only after consent and keeps complete v5 results cached', async () => {
@@ -668,6 +705,59 @@ describe('place disambiguation', () => {
     const far: geo.GeoRecord = ['other', '小寨', 110, 30, 'P', 'PPL', '24', '', 'CN', []];
     const result = await geo.resolveTextPlaces([query, { name: '小寨', kind: 'settlement', country: 'CN', aliases: [] }, { name: '未知地点', kind: 'unknown', country: 'CN', aliases: [] }], '', async n => n === '平型关' ? [pass, village] : n === '小寨' ? [near, far] : []);
     expect(result.places.map(p => p.id)).toEqual(['geonames:1798648', 'geonames:7520534']); expect(result.unresolved).toEqual(['未知地点']);
+  });
+  it('resolves Hawaii across admin, island, and unknown queries using formal state suffixes and ADM1 hierarchy', async () => {
+    for (const q of [
+      { name: '夏威夷', aliases: ['Hawaii'], kind: 'admin' as const, country: 'US' },
+      { name: '夏威夷', aliases: [], kind: 'admin' as const, country: 'US' },
+      { name: '夏威夷', aliases: ['Hawaii'], kind: 'unknown' as const, country: 'US' },
+      { name: 'Hawaii', aliases: [], kind: 'admin' as const, country: 'US' },
+    ]) {
+      const result = await geo.resolveTextPlaces([q], '', lookupHawaii);
+      expect(result.unresolved).toEqual([]);
+      expect(result.places).toMatchObject([{ id: 'geonames:5855797', name: q.name, featureCode: 'ADM1', countryCode: 'US' }]);
+    }
+    expect((await geo.resolveTextPlaces([{ name: '夏威夷', aliases: ['Hawaii'], kind: 'island', country: 'US' }], '', lookupHawaii)).places[0]?.id).toBe('geonames:5855799');
+    expect((await geo.resolveTextPlaces([{ name: '夏威夷', aliases: ['Hawaiian Islands'], kind: 'island', country: 'US' }], '', lookupHawaii)).places[0]?.id).toBe('geonames:5855811');
+    expect((await geo.resolveTextPlaces([{ name: '夏威夷', aliases: ['Hawaiian Islands'], kind: 'unknown', country: 'US' }], '', lookupHawaii)).places[0]?.id).toBe('geonames:5855811');
+    const countyLookup = async (name: string, country: string) => name === 'Hawaii County' ? [hawaiiIndex['US:hawaii']![1]!] : lookupHawaii(name, country);
+    expect((await geo.resolveTextPlaces([{ name: 'Hawaii County', aliases: ['Hawaii'], kind: 'admin', country: 'US' }], '', countyLookup)).places[0]?.id).toBe('geonames:5855765');
+    const samePrimaryAdmin: geo.GeoRecord[] = [
+      ['adm1', 'Example', 10, 20, 'A', 'ADM1', 'EX', '', 'US', []],
+      ['adm2', 'Example', 10.1, 20.1, 'A', 'ADM2', 'EX', '001', 'US', []],
+    ];
+    expect((await geo.resolveTextPlaces([{ name: 'Example', aliases: [], kind: 'admin', country: 'US' }], '', async () => samePrimaryAdmin)).unresolved).toEqual(['Example']);
+    const otherStateCounty: geo.GeoRecord[] = [
+      ['adm1', 'Example', 10, 20, 'A', 'ADM1', 'EX', '', 'US', []],
+      ['adm2', 'Example County', 15, 25, 'A', 'ADM2', 'OT', '001', 'US', []],
+    ];
+    expect((await geo.resolveTextPlaces([{ name: 'Example', aliases: [], kind: 'admin', country: 'US' }], '', async () => otherStateCounty)).unresolved).toEqual(['Example']);
+  });
+  it('supports formal Japanese prefecture/region suffixes and island atolls while keeping unknown city/state names ambiguous', async () => {
+    const okinawaRows: Record<string, geo.GeoRecord[]> = {
+      'JP:冲绳县': [['1854345', 'Okinawa', 127.93333, 26.5, 'A', 'ADM1', '47', '', 'JP', [['zh-Hans', false, '', '']]]],
+      'JP:okinawa': [
+        ['1854343', 'Okinawa Shotō', 128.04364, 26.69311, 'T', 'ISLS', '47', '', 'JP', []],
+        ['1854345', 'Okinawa', 127.93333, 26.5, 'A', 'ADM1', '47', '', 'JP', []],
+        ['1854346', 'Okinawa', 127.94581, 26.50687, 'T', 'ISL', '47', '1858371', 'JP', []],
+        ['1894616', 'Okinawa', 127.80139, 26.33583, 'P', 'PPLA2', '47', '1854344', 'JP', []],
+      ],
+      'UM:midway': [
+        ['5854941', 'Midway Atoll National Wildlife Refuge', -177.389, 28.228, 'L', 'RESW', '300', '', 'UM', []],
+        ['5854942', 'Midway Atoll', -177.36989, 28.23164, 'T', 'ATOL', '300', '', 'UM', []],
+        ['11695313', 'Midway', -177.37515, 28.21222, 'P', 'PPL', '300', '', 'UM', []],
+      ],
+      'US:honolulu': [
+        ['5856195', 'Honolulu', -157.85833, 21.30694, 'P', 'PPLA', 'HI', '003', 'US', []],
+        ['other-honolulu', 'Honolulu', -90, 35, 'P', 'PPL', 'AL', '', 'US', []],
+      ],
+    };
+    const lookup = async (name: string, country: string) => okinawaRows[`${country}:${geo.normalizePlace(name)}`] ?? lookupHawaii(name, country);
+    expect((await geo.resolveTextPlaces([{ name: '冲绳', aliases: ['Okinawa'], kind: 'admin', country: 'JP' }], '', lookup)).places[0]?.id).toBe('geonames:1854345');
+    // Okinawa has a same-name city (PPLA2), so an ambiguous unknown query must not guess the prefecture.
+    expect((await geo.resolveTextPlaces([{ name: '冲绳', aliases: ['Okinawa'], kind: 'unknown', country: 'JP' }], '', lookup)).unresolved).toEqual(['冲绳']);
+    expect((await geo.resolveTextPlaces([{ name: '中途岛', aliases: ['Midway'], kind: 'island', country: 'UM' }], '', lookup)).places[0]?.id).toBe('geonames:5854942');
+    expect((await geo.resolveTextPlaces([{ name: '檀香山', aliases: ['Honolulu'], kind: 'city', country: 'US' }], '夏威夷', lookup)).places[0]?.id).toBe('geonames:5856195');
   });
 });
 
